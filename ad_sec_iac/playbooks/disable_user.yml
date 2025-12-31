@@ -1,6 +1,0 @@
-- name: Disable compromised AD account
-  hosts: dc25
-  tasks:
-    - name: Disable user
-      ansible.windows.win_shell: |
-        Disable-ADAccount -Identity "{{ compromised_user }}"
