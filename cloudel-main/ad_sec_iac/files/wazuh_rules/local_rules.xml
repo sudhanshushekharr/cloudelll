@@ -1,0 +1,281 @@
+<!-- Local rules for AD Security Lab -->
+<!-- Save this to /var/ossec/etc/rules/local_rules.xml on your Wazuh manager -->
+
+<group name="windows,sysmon,credential_theft,">
+  
+  <!-- Mimikatz Detection -->
+  <rule id="100010" level="15">
+    <if_sid>61603</if_sid>
+    <field name="win.eventdata.image" type="pcre2">(?i)mimikatz</field>
+    <description>Mimikatz credential dumping tool detected - $(win.eventdata.image)</description>
+    <mitre>
+      <id>T1003</id>
+      <id>T1003.001</id>
+    </mitre>
+  </rule>
+
+  <rule id="100011" level="15">
+    <if_sid>61603</if_sid>
+    <field name="win.eventdata.commandLine" type="pcre2">(?i)(sekurlsa|lsadump|privilege::debug)</field>
+    <description>Mimikatz command detected: $(win.eventdata.commandLine)</description>
+    <mitre>
+      <id>T1003</id>
+    </mitre>
+  </rule>
+
+  <!-- LSASS Memory Access -->
+  <rule id="100020" level="12">
+    <if_sid>61610</if_sid>
+    <field name="win.eventdata.targetImage" type="pcre2">(?i)lsass\.exe</field>
+    <field name="win.eventdata.grantedAccess">0x1010|0x1410|0x147a</field>
+    <description>Suspicious LSASS memory access detected from $(win.eventdata.sourceImage)</description>
+    <mitre>
+      <id>T1003.001</id>
+    </mitre>
+  </rule>
+
+  <!-- Credential Dumping File Creation -->
+  <rule id="100030" level="10">
+    <if_sid>61611</if_sid>
+    <field name="win.eventdata.targetFilename" type="pcre2">(?i)(\.kirbi|\.dmp|lsass)</field>
+    <description>Potential credential dump file created: $(win.eventdata.targetFilename)</description>
+    <mitre>
+      <id>T1003</id>
+    </mitre>
+  </rule>
+
+</group>
+
+<group name="windows,sysmon,kerberoasting,">
+  
+  <!-- Kerberoasting Detection -->
+  <rule id="100040" level="12">
+    <if_sid>61603</if_sid>
+    <field name="win.eventdata.commandLine" type="pcre2">(?i)(invoke-kerberoast|rubeus|get-spnticket)</field>
+    <description>Kerberoasting attack tool detected: $(win.eventdata.commandLine)</description>
+    <mitre>
+      <id>T1558.003</id>
+    </mitre>
+  </rule>
+
+  <!-- Rubeus specific detection -->
+  <rule id="100041" level="12">
+    <if_sid>61603</if_sid>
+    <field name="win.eventdata.image" type="pcre2">(?i)rubeus</field>
+    <description>Rubeus Kerberos exploitation tool detected</description>
+    <mitre>
+      <id>T1558</id>
+    </mitre>
+  </rule>
+
+</group>
+
+<group name="windows,active_directory,enumeration,">
+  
+  <!-- BloodHound Detection -->
+  <rule id="100050" level="10">
+    <if_sid>61603</if_sid>
+    <field name="win.eventdata.image" type="pcre2">(?i)sharphound</field>
+    <description>BloodHound data collector (SharpHound) detected</description>
+    <mitre>
+      <id>T1087.002</id>
+      <id>T1069.002</id>
+    </mitre>
+  </rule>
+
+  <rule id="100051" level="10">
+    <if_sid>61603</if_sid>
+    <field name="win.eventdata.commandLine" type="pcre2">(?i)(invoke-bloodhound|sharphound|bloodhound-python)</field>
+    <description>BloodHound enumeration command detected: $(win.eventdata.commandLine)</description>
+    <mitre>
+      <id>T1087</id>
+    </mitre>
+  </rule>
+
+  <!-- AD Reconnaissance -->
+  <rule id="100052" level="8">
+    <if_sid>61603</if_sid>
+    <field name="win.eventdata.commandLine" type="pcre2">(?i)(net user|net group|nltest|dsquery)</field>
+    <description>Active Directory reconnaissance command: $(win.eventdata.commandLine)</description>
+    <mitre>
+      <id>T1087.002</id>
+    </mitre>
+  </rule>
+
+</group>
+
+<group name="windows,responder,credential_theft,">
+  
+  <!-- Responder Detection -->
+  <rule id="100060" level="12">
+    <if_sid>61603</if_sid>
+    <field name="win.eventdata.image" type="pcre2">(?i)responder</field>
+    <description>Responder credential capture tool detected</description>
+    <mitre>
+      <id>T1557.001</id>
+    </mitre>
+  </rule>
+
+  <rule id="100061" level="12">
+    <if_sid>61603</if_sid>
+    <field name="win.eventdata.commandLine" type="pcre2">(?i)Responder\.py</field>
+    <description>Responder.py executed: $(win.eventdata.commandLine)</description>
+    <mitre>
+      <id>T1557.001</id>
+    </mitre>
+  </rule>
+
+</group>
+
+<group name="windows,lateral_movement,">
+  
+  <!-- PsExec Detection -->
+  <rule id="100070" level="10">
+    <if_sid>61603</if_sid>
+    <field name="win.eventdata.image" type="pcre2">(?i)psexec</field>
+    <description>PsExec lateral movement tool detected</description>
+    <mitre>
+      <id>T1021.002</id>
+    </mitre>
+  </rule>
+
+  <!-- Named Pipe Indicators -->
+  <rule id="100071" level="8">
+    <if_sid>61617,61618</if_sid>
+    <field name="win.eventdata.pipeName" type="pcre2">(?i)(psexec|paexec|remcom)</field>
+    <description>Suspicious named pipe detected: $(win.eventdata.pipeName)</description>
+    <mitre>
+      <id>T1021</id>
+    </mitre>
+  </rule>
+
+</group>
+
+<group name="windows,honeypot,">
+  
+  <!-- Honeypot Account Usage -->
+  <rule id="100080" level="15">
+    <if_sid>60103,60106</if_sid>
+    <field name="win.system.targetUserName">admin_backup|svc_test</field>
+    <description>CRITICAL: Honeypot account accessed - $(win.system.targetUserName)</description>
+    <mitre>
+      <id>T1078</id>
+    </mitre>
+  </rule>
+
+  <!-- Honeypot File Access -->
+  <rule id="100081" level="15">
+    <if_sid>61611</if_sid>
+    <field name="win.eventdata.targetFilename" type="pcre2">(?i)(passwords\.txt|credentials\.txt)</field>
+    <description>CRITICAL: Honeypot file accessed - $(win.eventdata.targetFilename)</description>
+    <mitre>
+      <id>T1552.001</id>
+    </mitre>
+  </rule>
+
+</group>
+
+<group name="windows,persistence,">
+  
+  <!-- Registry Persistence -->
+  <rule id="100090" level="10">
+    <if_sid>61612,61613</if_sid>
+    <field name="win.eventdata.targetObject" type="pcre2">(?i)(CurrentVersion\\Run|CurrentVersion\\RunOnce)</field>
+    <description>Persistence mechanism via registry detected: $(win.eventdata.targetObject)</description>
+    <mitre>
+      <id>T1547.001</id>
+    </mitre>
+  </rule>
+
+  <!-- WMI Persistence -->
+  <rule id="100091" level="10">
+    <if_sid>61619,61620,61621</if_sid>
+    <description>WMI persistence mechanism detected</description>
+    <mitre>
+      <id>T1546.003</id>
+    </mitre>
+  </rule>
+
+</group>
+
+<group name="windows,powershell,obfuscation,">
+  
+  <!-- Encoded PowerShell Commands -->
+  <rule id="100100" level="10">
+    <if_sid>61603</if_sid>
+    <field name="win.eventdata.commandLine" type="pcre2">(?i)(-enc|-encodedcommand)</field>
+    <description>Encoded PowerShell command detected - potential obfuscation</description>
+    <mitre>
+      <id>T1059.001</id>
+      <id>T1027</id>
+    </mitre>
+  </rule>
+
+  <!-- Suspicious PowerShell Downloads -->
+  <rule id="100101" level="12">
+    <if_sid>61603</if_sid>
+    <field name="win.eventdata.commandLine" type="pcre2">(?i)(downloadstring|downloadfile|invoke-webrequest|iwr|curl)</field>
+    <description>PowerShell download command detected: $(win.eventdata.commandLine)</description>
+    <mitre>
+      <id>T1105</id>
+    </mitre>
+  </rule>
+
+  <!-- Invoke-Expression usage -->
+  <rule id="100102" level="8">
+    <if_sid>61603</if_sid>
+    <field name="win.eventdata.commandLine" type="pcre2">(?i)(invoke-expression|iex)</field>
+    <description>Invoke-Expression detected - potential code execution</description>
+    <mitre>
+      <id>T1059.001</id>
+    </mitre>
+  </rule>
+
+</group>
+
+<group name="windows,pass_the_hash,">
+  
+  <!-- NTLM Logon Type 9 (NewCredentials) - PTH Indicator -->
+  <rule id="100110" level="10">
+    <if_sid>60103</if_sid>
+    <field name="win.system.logonType">9</field>
+    <description>Possible Pass-the-Hash attack - LogonType 9 detected for $(win.system.targetUserName)</description>
+    <mitre>
+      <id>T1550.002</id>
+    </mitre>
+  </rule>
+
+  <!-- Multiple failed logons followed by success -->
+  <rule id="100111" level="12" frequency="5" timeframe="300">
+    <if_matched_sid>60122</if_matched_sid>
+    <same_source_ip />
+    <description>Multiple failed authentication attempts from same source - possible credential stuffing</description>
+    <mitre>
+      <id>T1110</id>
+    </mitre>
+  </rule>
+
+</group>
+
+<group name="windows,compliance,">
+  
+  <!-- Security Policy Changes -->
+  <rule id="100120" level="8">
+    <if_sid>60204</if_sid>
+    <description>Audit policy was changed: $(win.system.eventID)</description>
+    <mitre>
+      <id>T1562.002</id>
+    </mitre>
+  </rule>
+
+  <!-- User Added to Privileged Group -->
+  <rule id="100121" level="12">
+    <if_sid>60132</if_sid>
+    <field name="win.eventdata.targetSid">S-1-5-32-544|S-1-5-21-*-512</field>
+    <description>User added to privileged group: $(win.eventdata.memberName)</description>
+    <mitre>
+      <id>T1098</id>
+    </mitre>
+  </rule>
+
+</group>

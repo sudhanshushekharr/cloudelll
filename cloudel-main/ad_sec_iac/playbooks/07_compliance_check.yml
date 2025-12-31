@@ -1,0 +1,252 @@
+---
+- name: Security Compliance Check
+  hosts: windows
+  gather_facts: yes
+
+  tasks:
+    - name: Compliance Check Banner
+      ansible.builtin.debug:
+        msg: "Running security compliance check for {{ inventory_hostname }}"
+
+    # ===========================================
+    # PASSWORD POLICY COMPLIANCE
+    # ===========================================
+
+    - name: Check password policy configuration
+      ansible.windows.win_shell: |
+        $policy = @{}
+        net accounts | ForEach-Object {
+          if ($_ -match "Minimum password length:\s+(\d+)") { $policy.MinLength = $matches[1] }
+          if ($_ -match "Lockout threshold:\s+(\d+)") { $policy.LockoutThreshold = $matches[1] }
+          if ($_ -match "Maximum password age.*:\s+(\d+)") { $policy.MaxAge = $matches[1] }
+        }
+        $policy | ConvertTo-Json
+      args:
+        executable: powershell
+      register: password_policy_check
+
+    - name: Evaluate password policy
+      ansible.builtin.set_fact:
+        password_policy_status: "{{ (password_policy_check.stdout | from_json).MinLength | int >= 14 }}"
+
+    # ===========================================
+    # SERVICE CONFIGURATION
+    # ===========================================
+
+    - name: Check for vulnerable services
+      ansible.windows.win_shell: |
+        $vulnerableServices = @('RemoteRegistry', 'Browser', 'SSDPSRV', 'upnphost')
+        $running = @()
+        foreach ($svc in $vulnerableServices) {
+          $service = Get-Service $svc -ErrorAction SilentlyContinue
+          if ($service -and $service.Status -eq 'Running') {
+            $running += $svc
+          }
+        }
+        $running | ConvertTo-Json
+      args:
+        executable: powershell
+      register: vulnerable_services
+
+    # ===========================================
+    # PROTOCOL SECURITY
+    # ===========================================
+
+    - name: Check SMBv1 status
+      ansible.windows.win_shell: |
+        (Get-WindowsOptionalFeature -Online -FeatureName SMB1Protocol).State
+      args:
+        executable: powershell
+      register: smbv1_status
+      ignore_errors: yes
+
+    - name: Check LLMNR status
+      ansible.windows.win_shell: |
+        (Get-ItemProperty "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient" -Name EnableMulticast -ErrorAction SilentlyContinue).EnableMulticast
+      args:
+        executable: powershell
+      register: llmnr_status
+
+    - name: Check WDigest status
+      ansible.windows.win_shell: |
+        (Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\WDigest" -Name UseLogonCredential -ErrorAction SilentlyContinue).UseLogonCredential
+      args:
+        executable: powershell
+      register: wdigest_status
+
+    # ===========================================
+    # AUDIT CONFIGURATION
+    # ===========================================
+
+    - name: Check audit policy configuration
+      ansible.windows.win_shell: |
+        $critical = @(
+          "Credential Validation",
+          "User Account Management",
+          "Logon"
+        )
+        $configured = 0
+        $total = $critical.Count
+
+        foreach ($cat in $critical) {
+          $result = auditpol /get /subcategory:"$cat" 2>$null
+          if ($result -match "Success and Failure") {
+            $configured++
+          }
+        }
+
+        @{
+          Configured = $configured
+          Total = $total
+          Percentage = [math]::Round(($configured / $total) * 100)
+        } | ConvertTo-Json
+      args:
+        executable: powershell
+      register: audit_policy_check
+
+    # ===========================================
+    # SYSMON CHECK
+    # ===========================================
+
+    - name: Check Sysmon installation
+      ansible.windows.win_service:
+        name: Sysmon64
+      register: sysmon_check
+      ignore_errors: yes
+
+    - name: Check Sysmon event count
+      ansible.windows.win_shell: |
+        (Get-WinEvent -LogName "Microsoft-Windows-Sysmon/Operational" -MaxEvents 1 -ErrorAction SilentlyContinue).RecordId
+      args:
+        executable: powershell
+      register: sysmon_events
+      ignore_errors: yes
+
+    # ===========================================
+    # POWERSHELL LOGGING
+    # ===========================================
+
+    - name: Check PowerShell logging configuration
+      ansible.windows.win_shell: |
+        $config = @{
+          ModuleLogging = (Get-ItemProperty "HKLM:\SOFTWARE\Policies\Microsoft\Windows\PowerShell\ModuleLogging" -Name EnableModuleLogging -ErrorAction SilentlyContinue).EnableModuleLogging
+          ScriptBlockLogging = (Get-ItemProperty "HKLM:\SOFTWARE\Policies\Microsoft\Windows\PowerShell\ScriptBlockLogging" -Name EnableScriptBlockLogging -ErrorAction SilentlyContinue).EnableScriptBlockLogging
+          Transcription = (Get-ItemProperty "HKLM:\SOFTWARE\Policies\Microsoft\Windows\PowerShell\Transcription" -Name EnableTranscripting -ErrorAction SilentlyContinue).EnableTranscripting
+        }
+        $config | ConvertTo-Json
+      args:
+        executable: powershell
+      register: ps_logging_check
+
+    # ===========================================
+    # GENERATE COMPLIANCE REPORT
+    # ===========================================
+
+    - name: Generate compliance report
+      ansible.windows.win_shell: |
+        $report = @{
+          Hostname = $env:COMPUTERNAME
+          Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+          Checks = @{
+            PasswordPolicy = @{
+              MinLength = {{ (password_policy_check.stdout | from_json).MinLength }}
+              Status = "{{ 'PASS' if password_policy_status else 'FAIL' }}"
+              Expected = "14+"
+            }
+            VulnerableServices = @{
+              Running = @({{ vulnerable_services.stdout if vulnerable_services.stdout else '[]' }})
+              Status = "{{ 'FAIL' if vulnerable_services.stdout and vulnerable_services.stdout != '[]' else 'PASS' }}"
+            }
+            SMBv1 = @{
+              State = "{{ smbv1_status.stdout | trim if smbv1_status.stdout else 'Unknown' }}"
+              Status = "{{ 'PASS' if smbv1_status.stdout and 'Disabled' in smbv1_status.stdout else 'FAIL' }}"
+            }
+            LLMNR = @{
+              Enabled = {{ llmnr_status.stdout | trim if llmnr_status.stdout else 'null' }}
+              Status = "{{ 'PASS' if llmnr_status.stdout and llmnr_status.stdout | trim == '0' else 'FAIL' }}"
+            }
+            WDigest = @{
+              Enabled = {{ wdigest_status.stdout | trim if wdigest_status.stdout else 'null' }}
+              Status = "{{ 'PASS' if wdigest_status.stdout and wdigest_status.stdout | trim == '0' else 'FAIL' }}"
+            }
+            AuditPolicies = {{ audit_policy_check.stdout }}
+            Sysmon = @{
+              Installed = "{{ 'Yes' if sysmon_check is not failed else 'No' }}"
+              EventCount = {{ sysmon_events.stdout | trim if sysmon_events.stdout else '0' }}
+              Status = "{{ 'PASS' if sysmon_check is not failed else 'FAIL' }}"
+            }
+            PowerShellLogging = {{ ps_logging_check.stdout }}
+          }
+        }
+
+        # Calculate overall score
+        $passed = 0
+        $total = 0
+        foreach ($check in $report.Checks.Values) {
+          if ($check.Status) {
+            $total++
+            if ($check.Status -eq "PASS") { $passed++ }
+          }
+        }
+
+        $report.OverallScore = @{
+          Passed = $passed
+          Total = $total
+          Percentage = [math]::Round(($passed / $total) * 100)
+        }
+
+        $report | ConvertTo-Json -Depth 5 | Out-File "C:\compliance_report.json"
+        $report | ConvertTo-Json -Depth 5
+      args:
+        executable: powershell
+      register: compliance_report
+
+    - name: Display compliance summary
+      ansible.builtin.debug:
+        var: compliance_report.stdout | from_json
+
+    - name: Fetch compliance report
+      ansible.builtin.fetch:
+        src: "C:\\compliance_report.json"
+        dest: "./compliance_reports/{{ inventory_hostname }}_compliance.json"
+        flat: yes
+
+# ===========================================
+# AGGREGATE REPORT
+# ===========================================
+
+- name: Generate Aggregate Compliance Report
+  hosts: localhost
+  gather_facts: no
+
+  tasks:
+    - name: Find all compliance reports
+      ansible.builtin.find:
+        paths: "./compliance_reports/"
+        patterns: "*_compliance.json"
+      register: report_files
+
+    - name: Load and aggregate reports
+      ansible.builtin.set_fact:
+        all_reports: "{{ all_reports | default([]) + [lookup('file', item.path) | from_json] }}"
+      loop: "{{ report_files.files }}"
+
+    - name: Calculate aggregate statistics
+      ansible.builtin.set_fact:
+        aggregate_stats:
+          total_hosts: "{{ all_reports | length }}"
+          average_score: "{{ (all_reports | map(attribute='OverallScore.Percentage') | map('int') | sum / all_reports | length) | round(2) }}"
+          hosts_passing: "{{ all_reports | selectattr('OverallScore.Percentage', 'ge', 80) | list | length }}"
+
+    - name: Display aggregate summary
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "  Aggregate Compliance Summary"
+          - "=========================================="
+          - "Total Hosts Checked: {{ aggregate_stats.total_hosts }}"
+          - "Average Score: {{ aggregate_stats.average_score }}%"
+          - "Hosts Passing (80%+): {{ aggregate_stats.hosts_passing }}"
+          - ""
+          - "Individual Reports:"
+          - "{% for report in all_reports %}- {{ report.Hostname }}: {{ report.OverallScore.Percentage }}%{% endfor %}"

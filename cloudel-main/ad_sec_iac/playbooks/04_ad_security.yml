@@ -1,0 +1,245 @@
+---
+- name: Active Directory Security Configuration
+  hosts: domain_controllers
+  gather_facts: yes
+
+  tasks:
+    - name: Display AD security configuration mode
+      ansible.builtin.debug:
+        msg: "Configuring AD security for {{ deployment_mode }} mode"
+
+    # ===========================================
+    # NTLM CONFIGURATION
+    # ===========================================
+
+    - name: Restrict NTLM (Protected Mode)
+      ansible.windows.win_regedit:
+        path: HKLM:\SYSTEM\CurrentControlSet\Control\Lsa
+        name: RestrictSendingNTLMTraffic
+        data: 2  # Deny all
+        type: dword
+      when: deployment_mode == 'protected'
+
+    - name: Allow NTLM (Vulnerable Mode - for demonstrations)
+      ansible.windows.win_regedit:
+        path: HKLM:\SYSTEM\CurrentControlSet\Control\Lsa
+        name: RestrictSendingNTLMTraffic
+        data: 0  # Allow all
+        type: dword
+      when: deployment_mode == 'vulnerable'
+
+    - name: Configure LM hash storage (Disabled in Protected)
+      ansible.windows.win_regedit:
+        path: HKLM:\SYSTEM\CurrentControlSet\Control\Lsa
+        name: NoLMHash
+        data: "{{ 1 if deployment_mode == 'protected' else 0 }}"
+        type: dword
+
+    # ===========================================
+    # KERBEROS HARDENING
+    # ===========================================
+
+    - name: Set Kerberos encryption types (Protected - strong encryption only)
+      ansible.windows.win_regedit:
+        path: HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System\Kerberos\Parameters
+        name: SupportedEncryptionTypes
+        data: 0x18  # AES128_HMAC_SHA1, AES256_HMAC_SHA1
+        type: dword
+      when: deployment_mode == 'protected'
+
+    - name: Allow RC4 Kerberos encryption (Vulnerable Mode)
+      ansible.windows.win_regedit:
+        path: HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System\Kerberos\Parameters
+        name: SupportedEncryptionTypes
+        data: 0x7FFFFFFF  # All encryption types including RC4
+        type: dword
+      when: deployment_mode == 'vulnerable'
+
+    # ===========================================
+    # HONEYPOT ACCOUNTS (Detection)
+    # ===========================================
+
+    - name: Create honeypot user accounts
+      ansible.windows.win_user:
+        name: "{{ item.name }}"
+        password: "{{ item.password }}"
+        description: "{{ item.description }}"
+        state: present
+        password_never_expires: yes
+        account_disabled: no
+      loop: "{{ honeypot_accounts }}"
+      when: deployment_mode == 'protected'
+
+    - name: Add honeypot accounts to interesting groups
+      ansible.windows.win_shell: |
+        Add-ADGroupMember -Identity "Domain Admins" -Members "{{ item.name }}" -ErrorAction SilentlyContinue
+      args:
+        executable: powershell
+      loop: "{{ honeypot_accounts }}"
+      when: deployment_mode == 'protected'
+      ignore_errors: yes
+
+    - name: Set DENY logon for honeypot accounts (they should never actually log in)
+      ansible.windows.win_shell: |
+        $user = Get-ADUser "{{ item.name }}"
+        Set-ADUser $user -CannotChangePassword $true
+        # Set deny interactive logon
+        $sid = $user.SID
+        secedit /export /cfg C:\secpol_temp.cfg
+        (Get-Content C:\secpol_temp.cfg) -replace "SeDenyInteractiveLogonRight = ", "SeDenyInteractiveLogonRight = *$sid," | Out-File C:\secpol_temp.cfg
+        secedit /configure /db C:\windows\security\local.sdb /cfg C:\secpol_temp.cfg /areas USER_RIGHTS
+        Remove-Item C:\secpol_temp.cfg
+      args:
+        executable: powershell
+      loop: "{{ honeypot_accounts }}"
+      when: deployment_mode == 'protected'
+      ignore_errors: yes
+
+    # ===========================================
+    # HONEYPOT FILES
+    # ===========================================
+
+    - name: Create honeypot directories
+      ansible.windows.win_file:
+        path: "{{ item.path | win_dirname }}"
+        state: directory
+      loop: "{{ honeypot_files }}"
+      when: deployment_mode == 'protected'
+
+    - name: Create honeypot files with fake credentials
+      ansible.windows.win_copy:
+        content: "{{ item.content }}"
+        dest: "{{ item.path }}"
+      loop: "{{ honeypot_files }}"
+      when: deployment_mode == 'protected'
+
+    - name: Configure SACL auditing on honeypot files
+      ansible.windows.win_shell: |
+        $acl = Get-Acl "{{ item.path }}"
+        $auditRule = New-Object System.Security.AccessControl.FileSystemAuditRule("Everyone", "ReadAndExecute", "Success")
+        $acl.AddAuditRule($auditRule)
+        Set-Acl "{{ item.path }}" $acl
+      args:
+        executable: powershell
+      loop: "{{ honeypot_files }}"
+      when: deployment_mode == 'protected'
+
+    # ===========================================
+    # PRIVILEGED ACCOUNT PROTECTION
+    # ===========================================
+
+    - name: Enable Protected Users group (Protected Mode)
+      ansible.windows.win_shell: |
+        # Protected Users group prevents credential caching and forces Kerberos
+        $protectedGroup = Get-ADGroup "Protected Users" -ErrorAction SilentlyContinue
+        if ($protectedGroup) {
+          # Add domain admin accounts to Protected Users
+          Get-ADGroupMember "Domain Admins" | ForEach-Object {
+            Add-ADGroupMember -Identity "Protected Users" -Members $_.SamAccountName -ErrorAction SilentlyContinue
+          }
+          Write-Output "Protected Users group configured"
+        }
+      args:
+        executable: powershell
+      when: deployment_mode == 'protected'
+      ignore_errors: yes
+
+    # ===========================================
+    # DISABLE DANGEROUS DELEGATIONS
+    # ===========================================
+
+    - name: Check for unconstrained delegation
+      ansible.windows.win_shell: |
+        Get-ADComputer -Filter {TrustedForDelegation -eq $true} | Select-Object Name, DNSHostName | ConvertTo-Json
+      args:
+        executable: powershell
+      register: unconstrained_delegation
+      ignore_errors: yes
+
+    - name: Display unconstrained delegation warning
+      ansible.builtin.debug:
+        msg: "WARNING: Found computers with unconstrained delegation: {{ unconstrained_delegation.stdout }}"
+      when: 
+        - unconstrained_delegation.stdout is defined
+        - unconstrained_delegation.stdout | trim != ""
+        - deployment_mode == 'protected'
+
+    # ===========================================
+    # STALE ACCOUNT DETECTION
+    # ===========================================
+
+    - name: Find stale user accounts (not logged in for 90+ days)
+      ansible.windows.win_shell: |
+        $date = (Get-Date).AddDays(-90)
+        Get-ADUser -Filter {LastLogonDate -lt $date -and Enabled -eq $true} -Properties LastLogonDate | 
+        Select-Object Name, SamAccountName, LastLogonDate | 
+        ConvertTo-Json
+      args:
+        executable: powershell
+      register: stale_accounts
+      ignore_errors: yes
+
+    - name: Save stale accounts report
+      ansible.windows.win_copy:
+        content: "{{ stale_accounts.stdout }}"
+        dest: "C:\\stale_accounts_report.json"
+      when: stale_accounts.stdout is defined
+
+    # ===========================================
+    # SERVICE ACCOUNT AUDITING
+    # ===========================================
+
+    - name: Find service accounts with SPNs (potential Kerberoasting targets)
+      ansible.windows.win_shell: |
+        Get-ADUser -Filter {ServicePrincipalName -ne "$null"} -Properties ServicePrincipalName, PasswordLastSet | 
+        Select-Object Name, SamAccountName, ServicePrincipalName, PasswordLastSet | 
+        ConvertTo-Json
+      args:
+        executable: powershell
+      register: spn_accounts
+      ignore_errors: yes
+
+    - name: Save SPN accounts report
+      ansible.windows.win_copy:
+        content: "{{ spn_accounts.stdout }}"
+        dest: "C:\\spn_accounts_report.json"
+      when: spn_accounts.stdout is defined
+
+    # ===========================================
+    # ADMIN COUNT MONITORING
+    # ===========================================
+
+    - name: Check AdminCount attribute (privileged accounts)
+      ansible.windows.win_shell: |
+        Get-ADUser -LDAPFilter "(admincount=1)" -Properties WhenCreated | 
+        Select-Object Name, SamAccountName, WhenCreated | 
+        ConvertTo-Json
+      args:
+        executable: powershell
+      register: admin_count_users
+      ignore_errors: yes
+
+    # ===========================================
+    # REPORTING
+    # ===========================================
+
+    - name: Generate AD security report
+      ansible.windows.win_shell: |
+        $report = @{
+          Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+          Mode = "{{ deployment_mode }}"
+          NTLMRestriction = (Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa" -ErrorAction SilentlyContinue).RestrictSendingNTLMTraffic
+          HoneypotAccounts = @('{{ honeypot_accounts | map(attribute='name') | join("','") }}')
+          StaleAccounts = {{ (stale_accounts.stdout | from_json | length) if stale_accounts.stdout else 0 }}
+          ServiceAccounts = {{ (spn_accounts.stdout | from_json | length) if spn_accounts.stdout else 0 }}
+          PrivilegedUsers = {{ (admin_count_users.stdout | from_json | length) if admin_count_users.stdout else 0 }}
+        }
+        $report | ConvertTo-Json -Depth 3 | Out-File "C:\ad_security_report.json"
+        $report | ConvertTo-Json
+      args:
+        executable: powershell
+      register: ad_report
+
+    - name: Display AD security summary
+      ansible.builtin.debug:
+        msg: "{{ ad_report.stdout | from_json }}"

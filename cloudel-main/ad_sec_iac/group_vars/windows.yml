@@ -1,0 +1,76 @@
+---
+# Windows-specific variables
+
+# Password Policy (varies by mode)
+password_policy:
+  vulnerable:
+    min_password_length: 6
+    password_complexity: 0
+    min_password_age: 0
+    max_password_age: 0
+    lockout_threshold: 0
+    lockout_duration: 0
+  protected:
+    min_password_length: 14
+    password_complexity: 1
+    max_password_age: 60
+    min_password_age: 1
+    lockout_threshold: 5
+    lockout_duration: 30
+
+# Audit Policies
+audit_policies:
+  - category: "Account Logon"
+    subcategory: "Credential Validation"
+    setting: "Success,Failure"
+  - category: "Account Management"
+    subcategory: "User Account Management"
+    setting: "Success,Failure"
+  - category: "Logon/Logoff"
+    subcategory: "Logon"
+    setting: "Success,Failure"
+  - category: "Object Access"
+    subcategory: "File System"
+    setting: "Success,Failure"
+  - category: "Policy Change"
+    subcategory: "Audit Policy Change"
+    setting: "Success,Failure"
+  - category: "Privilege Use"
+    subcategory: "Sensitive Privilege Use"
+    setting: "Success,Failure"
+
+# PowerShell Logging
+powershell_logging:
+  module_logging: true
+  script_block_logging: true
+  transcription: true
+  transcription_path: "C:\\PSTranscripts"
+
+# Services to disable in protected mode
+services_to_disable:
+  - "RemoteRegistry"
+  - "Browser"
+  - "SSDPSRV" # SSDP Discovery
+  - "upnphost" # UPnP Device Host
+
+# Sysmon Configuration
+sysmon:
+  version: "15.15"
+  download_url: "https://download.sysinternals.com/files/Sysmon.zip"
+  install_path: "C:\\Program Files\\Sysmon"
+  service_name: "Sysmon64"
+
+# Honeypot Configuration
+honeypot_accounts:
+  - name: "admin_backup"
+    password: "BackupAdmin123!"
+    description: "Honeypot account for detection"
+  - name: "svc_test"
+    password: "ServiceTest456!"
+    description: "Honeypot service account"
+
+honeypot_files:
+  - path: "C:\\Users\\Public\\Documents\\passwords.txt"
+    content: "admin:Password123\nroot:SuperSecret!"
+  - path: "C:\\AdminTools\\credentials.txt"
+    content: "Database Admin Password: DbP@ss2024"

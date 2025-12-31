@@ -1,0 +1,419 @@
+---
+# Diagnostic Playbook - Troubleshooting and System Health Check
+# Usage: ansible-playbook playbooks/99_diagnostics.yml
+
+- name: System Diagnostics and Health Check
+  hosts: windows
+  gather_facts: yes
+
+  tasks:
+    - name: Diagnostic Banner
+      ansible.builtin.debug:
+        msg: "Running diagnostics on {{ inventory_hostname }}"
+
+    # ===========================================
+    # BASIC CONNECTIVITY
+    # ===========================================
+
+    - name: Check basic connectivity
+      ansible.windows.win_ping:
+      register: ping_result
+
+    - name: Current user context
+      ansible.windows.win_whoami:
+      register: whoami_result
+
+    - name: Display connection info
+      ansible.builtin.debug:
+        msg:
+          - "Connected as: {{ whoami_result.account.account_name }}"
+          - "Is Admin: {{ whoami_result.account.sid in whoami_result.groups | map(attribute='sid') }}"
+
+    # ===========================================
+    # WINRM STATUS
+    # ===========================================
+
+    - name: Check WinRM service
+      ansible.windows.win_service:
+        name: WinRM
+      register: winrm_service
+
+    - name: Get WinRM configuration
+      ansible.windows.win_shell: |
+        winrm get winrm/config | Out-String
+      args:
+        executable: powershell
+      register: winrm_config
+
+    - name: Display WinRM status
+      ansible.builtin.debug:
+        msg:
+          - "WinRM Service: {{ winrm_service.state }}"
+          - "Start Mode: {{ winrm_service.start_mode }}"
+
+    # ===========================================
+    # SYSMON DIAGNOSTICS
+    # ===========================================
+
+    - name: Check Sysmon service
+      ansible.windows.win_service:
+        name: Sysmon64
+      register: sysmon_service
+      ignore_errors: yes
+
+    - name: Check Sysmon installation directory
+      ansible.windows.win_stat:
+        path: "C:\\Program Files\\Sysmon"
+      register: sysmon_dir
+
+    - name: Get Sysmon event count
+      ansible.windows.win_shell: |
+        try {
+          $events = Get-WinEvent -LogName "Microsoft-Windows-Sysmon/Operational" -ErrorAction SilentlyContinue
+          $totalEvents = $events.Count
+          $recentEvents = ($events | Where-Object {$_.TimeCreated -gt (Get-Date).AddHours(-1)}).Count
+          @{
+            Total = $totalEvents
+            LastHour = $recentEvents
+            LastEvent = ($events | Select-Object -First 1).TimeCreated.ToString()
+          } | ConvertTo-Json
+        } catch {
+          @{Total = 0; LastHour = 0; LastEvent = "None"} | ConvertTo-Json
+        }
+      args:
+        executable: powershell
+      register: sysmon_events
+
+    - name: Display Sysmon status
+      ansible.builtin.debug:
+        msg:
+          - "Sysmon Service: {{ 'RUNNING' if sysmon_service is not failed and sysmon_service.state == 'running' else 'NOT RUNNING' }}"
+          - "Installation Dir: {{ 'EXISTS' if sysmon_dir.stat.exists else 'MISSING' }}"
+          - "Events: {{ sysmon_events.stdout | from_json }}"
+
+    # ===========================================
+    # WAZUH AGENT DIAGNOSTICS
+    # ===========================================
+
+    - name: Check Wazuh agent service
+      ansible.windows.win_service:
+        name: WazuhSvc
+      register: wazuh_service
+      ignore_errors: yes
+
+    - name: Check Wazuh installation
+      ansible.windows.win_stat:
+        path: "C:\\Program Files (x86)\\ossec-agent"
+      register: wazuh_dir
+
+    - name: Get Wazuh agent status
+      ansible.windows.win_shell: |
+        $ossecPath = "C:\Program Files (x86)\ossec-agent"
+        if (Test-Path "$ossecPath\ossec.conf") {
+          $config = Get-Content "$ossecPath\ossec.conf" -Raw
+          $server = if ($config -match '<address>(.*?)</address>') { $matches[1] } else { "Not configured" }
+          $agentId = if (Test-Path "$ossecPath\client.keys") { 
+            (Get-Content "$ossecPath\client.keys").Split()[0] 
+          } else { "No key" }
+          
+          @{
+            Server = $server
+            AgentId = $agentId
+            ConfigExists = $true
+          } | ConvertTo-Json
+        } else {
+          @{Server = "N/A"; AgentId = "N/A"; ConfigExists = $false} | ConvertTo-Json
+        }
+      args:
+        executable: powershell
+      register: wazuh_config
+      ignore_errors: yes
+
+    - name: Test connectivity to Wazuh server
+      ansible.windows.win_shell: |
+        $wazuhServer = "{{ wazuh_manager_ip }}"
+        $result = Test-NetConnection -ComputerName $wazuhServer -Port 1514 -WarningAction SilentlyContinue
+        @{
+          Host = $wazuhServer
+          Port = 1514
+          Reachable = $result.TcpTestSucceeded
+        } | ConvertTo-Json
+      args:
+        executable: powershell
+      register: wazuh_connectivity
+
+    - name: Display Wazuh agent status
+      ansible.builtin.debug:
+        msg:
+          - "Wazuh Service: {{ 'RUNNING' if wazuh_service is not failed and wazuh_service.state == 'running' else 'NOT RUNNING' }}"
+          - "Installation: {{ 'EXISTS' if wazuh_dir.stat.exists else 'MISSING' }}"
+          - "Config: {{ wazuh_config.stdout | from_json }}"
+          - "Connectivity: {{ wazuh_connectivity.stdout | from_json }}"
+
+    # ===========================================
+    # SECURITY CONFIGURATION
+    # ===========================================
+
+    - name: Check password policy
+      ansible.windows.win_shell: |
+        $policy = @{}
+        net accounts | ForEach-Object {
+          if ($_ -match "Minimum password length:\s+(\d+)") { $policy.MinLength = $matches[1] }
+          if ($_ -match "Lockout threshold:\s+(\d+)") { $policy.LockoutThreshold = $matches[1] }
+          if ($_ -match "Maximum password age.*:\s+(\d+)") { $policy.MaxAge = $matches[1] }
+        }
+        $policy | ConvertTo-Json
+      args:
+        executable: powershell
+      register: password_policy
+
+    - name: Check critical registry settings
+      ansible.windows.win_shell: |
+        @{
+          LLMNR = (Get-ItemProperty "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient" -Name EnableMulticast -ErrorAction SilentlyContinue).EnableMulticast
+          WDigest = (Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\WDigest" -Name UseLogonCredential -ErrorAction SilentlyContinue).UseLogonCredential
+          PSModuleLogging = (Get-ItemProperty "HKLM:\SOFTWARE\Policies\Microsoft\Windows\PowerShell\ModuleLogging" -Name EnableModuleLogging -ErrorAction SilentlyContinue).EnableModuleLogging
+          PSScriptBlockLogging = (Get-ItemProperty "HKLM:\SOFTWARE\Policies\Microsoft\Windows\PowerShell\ScriptBlockLogging" -Name EnableScriptBlockLogging -ErrorAction SilentlyContinue).EnableScriptBlockLogging
+        } | ConvertTo-Json
+      args:
+        executable: powershell
+      register: security_settings
+
+    - name: Display security configuration
+      ansible.builtin.debug:
+        msg:
+          - "Password Policy: {{ password_policy.stdout | from_json }}"
+          - "Security Settings: {{ security_settings.stdout | from_json }}"
+
+    # ===========================================
+    # EVENT LOGS STATUS
+    # ===========================================
+
+    - name: Check event log sizes and status
+      ansible.windows.win_shell: |
+        $logs = @('Security', 'Application', 'System', 'Microsoft-Windows-Sysmon/Operational')
+        $results = @()
+        foreach ($log in $logs) {
+          try {
+            $logInfo = Get-WinEvent -LogName $log -MaxEvents 1 -ErrorAction SilentlyContinue
+            if ($logInfo) {
+              $results += @{
+                Name = $log
+                RecordCount = $logInfo.RecordId
+                LastEvent = $logInfo.TimeCreated.ToString()
+                Status = "OK"
+              }
+            } else {
+              $results += @{Name = $log; Status = "Empty"}
+            }
+          } catch {
+            $results += @{Name = $log; Status = "Error: $_"}
+          }
+        }
+        $results | ConvertTo-Json
+      args:
+        executable: powershell
+      register: event_logs
+
+    - name: Display event log status
+      ansible.builtin.debug:
+        var: event_logs.stdout | from_json
+
+    # ===========================================
+    # AUDIT POLICY CHECK
+    # ===========================================
+
+    - name: Check critical audit policies
+      ansible.windows.win_shell: |
+        $categories = @(
+          "Credential Validation",
+          "User Account Management",
+          "Logon",
+          "Process Creation"
+        )
+        $results = @()
+        foreach ($cat in $categories) {
+          $output = auditpol /get /subcategory:"$cat" 2>$null
+          $status = if ($output -match "Success and Failure") { "Enabled" } 
+                    elseif ($output -match "Success") { "Partial" }
+                    else { "Disabled" }
+          $results += @{Category = $cat; Status = $status}
+        }
+        $results | ConvertTo-Json
+      args:
+        executable: powershell
+      register: audit_policies
+
+    - name: Display audit policy status
+      ansible.builtin.debug:
+        var: audit_policies.stdout | from_json
+
+    # ===========================================
+    # DISK SPACE CHECK
+    # ===========================================
+
+    - name: Check disk space
+      ansible.windows.win_shell: |
+        Get-PSDrive C | Select-Object @{
+          Name='Drive'; Expression={$_.Name}
+        }, @{
+          Name='UsedGB'; Expression={[math]::Round($_.Used/1GB, 2)}
+        }, @{
+          Name='FreeGB'; Expression={[math]::Round($_.Free/1GB, 2)}
+        }, @{
+          Name='TotalGB'; Expression={[math]::Round(($_.Used + $_.Free)/1GB, 2)}
+        }, @{
+          Name='PercentFree'; Expression={[math]::Round(($_.Free/($_.Used + $_.Free))*100, 2)}
+        } | ConvertTo-Json
+      args:
+        executable: powershell
+      register: disk_space
+
+    - name: Display disk space
+      ansible.builtin.debug:
+        var: disk_space.stdout | from_json
+
+    # ===========================================
+    # GENERATE DIAGNOSTIC REPORT
+    # ===========================================
+
+    - name: Generate comprehensive diagnostic report
+      ansible.windows.win_shell: |
+        $report = @{
+          Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+          Hostname = $env:COMPUTERNAME
+          CurrentMode = "{{ deployment_mode }}"
+          Components = @{
+            WinRM = @{
+              Status = "{{ winrm_service.state }}"
+              StartMode = "{{ winrm_service.start_mode }}"
+            }
+            Sysmon = @{
+              Installed = {{ 'true' if sysmon_service is not failed else 'false' }}
+              Running = "{{ 'Yes' if sysmon_service is not failed and sysmon_service.state == 'running' else 'No' }}"
+              Events = {{ sysmon_events.stdout }}
+            }
+            WazuhAgent = @{
+              Installed = {{ 'true' if wazuh_dir.stat.exists else 'false' }}
+              Running = "{{ 'Yes' if wazuh_service is not failed and wazuh_service.state == 'running' else 'No' }}"
+              Config = {{ wazuh_config.stdout if wazuh_config.stdout else '{}' }}
+              Connectivity = {{ wazuh_connectivity.stdout }}
+            }
+          }
+          Security = @{
+            PasswordPolicy = {{ password_policy.stdout }}
+            Settings = {{ security_settings.stdout }}
+            AuditPolicies = {{ audit_policies.stdout }}
+          }
+          EventLogs = {{ event_logs.stdout }}
+          DiskSpace = {{ disk_space.stdout }}
+          Issues = @()
+        }
+
+        # Identify issues
+        if ("{{ sysmon_service.state if sysmon_service is not failed else 'stopped' }}" -ne "running") {
+          $report.Issues += "Sysmon service not running"
+        }
+        if ("{{ wazuh_service.state if wazuh_service is not failed else 'stopped' }}" -ne "running") {
+          $report.Issues += "Wazuh agent service not running"
+        }
+        if ({{ '(wazuh_connectivity.stdout | from_json).Reachable' }} -eq $false) {
+          $report.Issues += "Cannot reach Wazuh server"
+        }
+
+        $report | ConvertTo-Json -Depth 5 | Out-File "C:\diagnostic_report.json"
+        Write-Output "Diagnostic report saved to C:\diagnostic_report.json"
+        $report | ConvertTo-Json -Depth 5
+      args:
+        executable: powershell
+      register: diagnostic_report
+
+    - name: Fetch diagnostic report
+      ansible.builtin.fetch:
+        src: "C:\\diagnostic_report.json"
+        dest: "./diagnostics/{{ inventory_hostname }}_diagnostics.json"
+        flat: yes
+
+# ===========================================
+# WAZUH MANAGER DIAGNOSTICS
+# ===========================================
+
+- name: Wazuh Manager Diagnostics
+  hosts: localhost
+  gather_facts: no
+  become: yes
+
+  tasks:
+    - name: Check Wazuh Manager service
+      ansible.builtin.systemd:
+        name: wazuh-manager
+      register: wazuh_manager_service
+      delegate_to: "{{ wazuh_manager_ip }}"
+
+    - name: Check active agents
+      ansible.builtin.shell: |
+        /var/ossec/bin/agent_control -l | grep "is available" | wc -l
+      register: active_agents
+      delegate_to: "{{ wazuh_manager_ip }}"
+
+    - name: Check custom rules
+      ansible.builtin.shell: |
+        if [ -f /var/ossec/etc/rules/local_rules.xml ]; then
+          grep -c "rule id=" /var/ossec/etc/rules/local_rules.xml || echo "0"
+        else
+          echo "0"
+        fi
+      register: custom_rules_count
+      delegate_to: "{{ wazuh_manager_ip }}"
+
+    - name: Check active response configuration
+      ansible.builtin.shell: |
+        grep -c "<disabled>no</disabled>" /var/ossec/etc/ossec.conf || echo "0"
+      register: active_responses
+      delegate_to: "{{ wazuh_manager_ip }}"
+
+    - name: Check recent alerts
+      ansible.builtin.shell: |
+        tail -100 /var/ossec/logs/alerts/alerts.log | grep "Rule:" | wc -l
+      register: recent_alerts
+      delegate_to: "{{ wazuh_manager_ip }}"
+      ignore_errors: yes
+
+    - name: Display Wazuh Manager status
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "  Wazuh Manager Diagnostics"
+          - "=========================================="
+          - "Service Status: {{ wazuh_manager_service.status.ActiveState }}"
+          - "Active Agents: {{ active_agents.stdout }}"
+          - "Custom Rules: {{ custom_rules_count.stdout }}"
+          - "Active Responses Enabled: {{ active_responses.stdout }}"
+          - "Recent Alerts (last 100): {{ recent_alerts.stdout }}"
+
+# ===========================================
+# SUMMARY
+# ===========================================
+
+- name: Diagnostic Summary
+  hosts: localhost
+  gather_facts: no
+
+  tasks:
+    - name: Find all diagnostic reports
+      ansible.builtin.find:
+        paths: "./diagnostics/"
+        patterns: "*_diagnostics.json"
+      register: diagnostic_files
+
+    - name: Display summary
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "  Diagnostic Summary"
+          - "=========================================="
+          - "Reports generated: {{ diagnostic_files.matched }}"
+          - "Location: ./diagnostics/"
+          - ""
+          - "Review individual reports for detailed information"
+          - "Common issues will be highlighted in each report"

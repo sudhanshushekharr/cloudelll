@@ -1,0 +1,196 @@
+---
+- name: Configure Advanced Windows Audit Policies
+  hosts: windows
+  gather_facts: yes
+
+  tasks:
+    - name: Display audit configuration mode
+      ansible.builtin.debug:
+        msg: "Configuring audit policies for {{ deployment_mode }} mode"
+
+    # ===========================================
+    # ADVANCED AUDIT POLICY CONFIGURATION
+    # ===========================================
+
+    - name: Configure Account Logon - Credential Validation
+      ansible.windows.win_shell: |
+        auditpol /set /subcategory:"Credential Validation" /success:enable /failure:enable
+      args:
+        executable: cmd
+      register: audit_cred_val
+
+    - name: Configure Account Management - User Account Management
+      ansible.windows.win_shell: |
+        auditpol /set /subcategory:"User Account Management" /success:enable /failure:enable
+      args:
+        executable: cmd
+
+    - name: Configure Account Management - Security Group Management
+      ansible.windows.win_shell: |
+        auditpol /set /subcategory:"Security Group Management" /success:enable /failure:enable
+      args:
+        executable: cmd
+
+    - name: Configure Logon/Logoff - Logon
+      ansible.windows.win_shell: |
+        auditpol /set /subcategory:"Logon" /success:enable /failure:enable
+      args:
+        executable: cmd
+
+    - name: Configure Logon/Logoff - Logoff
+      ansible.windows.win_shell: |
+        auditpol /set /subcategory:"Logoff" /success:enable
+      args:
+        executable: cmd
+
+    - name: Configure Logon/Logoff - Account Lockout
+      ansible.windows.win_shell: |
+        auditpol /set /subcategory:"Account Lockout" /failure:enable
+      args:
+        executable: cmd
+
+    - name: Configure Logon/Logoff - Special Logon
+      ansible.windows.win_shell: |
+        auditpol /set /subcategory:"Special Logon" /success:enable
+      args:
+        executable: cmd
+
+    - name: Configure Object Access - File System
+      ansible.windows.win_shell: |
+        auditpol /set /subcategory:"File System" /success:enable /failure:enable
+      args:
+        executable: cmd
+      when: deployment_mode == 'protected'
+
+    - name: Configure Object Access - Registry
+      ansible.windows.win_shell: |
+        auditpol /set /subcategory:"Registry" /success:enable /failure:enable
+      args:
+        executable: cmd
+      when: deployment_mode == 'protected'
+
+    - name: Configure Policy Change - Audit Policy Change
+      ansible.windows.win_shell: |
+        auditpol /set /subcategory:"Audit Policy Change" /success:enable /failure:enable
+      args:
+        executable: cmd
+
+    - name: Configure Privilege Use - Sensitive Privilege Use
+      ansible.windows.win_shell: |
+        auditpol /set /subcategory:"Sensitive Privilege Use" /success:enable /failure:enable
+      args:
+        executable: cmd
+
+    - name: Configure System - Security State Change
+      ansible.windows.win_shell: |
+        auditpol /set /subcategory:"Security State Change" /success:enable /failure:enable
+      args:
+        executable: cmd
+
+    - name: Configure System - Security System Extension
+      ansible.windows.win_shell: |
+        auditpol /set /subcategory:"Security System Extension" /success:enable /failure:enable
+      args:
+        executable: cmd
+
+    # ===========================================
+    # PROCESS CREATION AUDITING (Event 4688)
+    # ===========================================
+
+    - name: Enable command line auditing in process creation events
+      ansible.windows.win_regedit:
+        path: HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System\Audit
+        name: ProcessCreationIncludeCmdLine_Enabled
+        data: 1
+        type: dword
+
+    # ===========================================
+    # INCREASE SECURITY LOG SIZE
+    # ===========================================
+
+    - name: Increase Security Event Log size to 2GB
+      ansible.windows.win_shell: |
+        wevtutil sl Security /ms:2147483648
+      args:
+        executable: cmd
+
+    - name: Increase Application Event Log size
+      ansible.windows.win_shell: |
+        wevtutil sl Application /ms:1073741824
+      args:
+        executable: cmd
+
+    - name: Increase System Event Log size
+      ansible.windows.win_shell: |
+        wevtutil sl System /ms:1073741824
+      args:
+        executable: cmd
+
+    # ===========================================
+    # CONFIGURE EVENT LOG RETENTION
+    # ===========================================
+
+    - name: Set Security log to overwrite as needed
+      ansible.windows.win_shell: |
+        wevtutil sl Security /rt:false
+      args:
+        executable: cmd
+
+    # ===========================================
+    # SPECIAL AUDITING FOR LSASS ACCESS
+    # ===========================================
+
+    - name: Enable LSASS process access auditing
+      ansible.windows.win_shell: |
+        auditpol /set /subcategory:"Process Creation" /success:enable
+      args:
+        executable: cmd
+
+    # ===========================================
+    # KERBEROS AUDITING
+    # ===========================================
+
+    - name: Configure Kerberos Authentication Service audit
+      ansible.windows.win_shell: |
+        auditpol /set /subcategory:"Kerberos Authentication Service" /success:enable /failure:enable
+      args:
+        executable: cmd
+
+    - name: Configure Kerberos Service Ticket Operations audit
+      ansible.windows.win_shell: |
+        auditpol /set /subcategory:"Kerberos Service Ticket Operations" /success:enable /failure:enable
+      args:
+        executable: cmd
+
+    # ===========================================
+    # VERIFY AND REPORT
+    # ===========================================
+
+    - name: Get current audit policy configuration
+      ansible.windows.win_shell: |
+        auditpol /get /category:* | Out-String
+      args:
+        executable: powershell
+      register: audit_policy_output
+
+    - name: Save audit policy to file
+      ansible.windows.win_copy:
+        content: "{{ audit_policy_output.stdout }}"
+        dest: "C:\\audit_policy_{{ deployment_mode }}.txt"
+
+    - name: Count Security log events
+      ansible.windows.win_shell: |
+        (Get-WinEvent -LogName Security -MaxEvents 1).RecordId
+      args:
+        executable: powershell
+      register: security_log_count
+      ignore_errors: yes
+
+    - name: Display audit configuration summary
+      ansible.builtin.debug:
+        msg:
+          - "Audit policies configured for {{ deployment_mode }} mode"
+          - "Security log max size: 2GB"
+          - "Command line auditing: Enabled"
+          - "Current Security log events: {{ security_log_count.stdout | trim if security_log_count.stdout else 'N/A' }}"
+          - "Full policy saved to: C:\\audit_policy_{{ deployment_mode }}.txt"

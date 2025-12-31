@@ -1,0 +1,231 @@
+---
+- name: Windows Baseline Security Hardening
+  hosts: windows
+  gather_facts: yes
+
+  tasks:
+    - name: Display current deployment mode
+      ansible.builtin.debug:
+        msg: "Deploying in {{ deployment_mode }} mode"
+
+    # ===========================================
+    # PASSWORD POLICY CONFIGURATION (CORRECTED)
+    # ===========================================
+
+    - name: Configure all password policies using secedit (more reliable)
+      ansible.windows.win_shell: |
+        $config = @"
+        [Unicode]
+        Unicode=yes
+        [System Access]
+        MinimumPasswordLength = {{ password_policy[deployment_mode].min_password_length }}
+        PasswordComplexity = {{ password_policy[deployment_mode].password_complexity }}
+        MinimumPasswordAge = {{ password_policy[deployment_mode].min_password_age }}
+        MaximumPasswordAge = {{ password_policy[deployment_mode].max_password_age }}
+        LockoutBadCount = {{ password_policy[deployment_mode].lockout_threshold }}
+        {% if password_policy[deployment_mode].lockout_threshold > 0 %}
+        ResetLockoutCount = {{ password_policy[deployment_mode].lockout_duration }}
+        LockoutDuration = {{ password_policy[deployment_mode].lockout_duration }}
+        {% endif %}
+        [Version]
+        signature="`$CHICAGO`$"
+        Revision=1
+        "@
+        $config | Out-File -FilePath C:\secpol_temp.cfg -Encoding unicode
+        secedit /configure /db C:\windows\security\local.sdb /cfg C:\secpol_temp.cfg /areas SECURITYPOLICY /quiet
+        Start-Sleep -Seconds 2
+        Remove-Item -Path C:\secpol_temp.cfg -Force -ErrorAction SilentlyContinue
+        Write-Output "Password policies configured successfully"
+      args:
+        executable: powershell
+      register: password_policy_result
+      changed_when: "'configured successfully' in password_policy_result.stdout"
+
+    - name: Display password policy result
+      ansible.builtin.debug:
+        var: password_policy_result.stdout_lines
+
+    # ===========================================
+    # POWERSHELL LOGGING
+    # ===========================================
+
+    - name: Enable PowerShell Module Logging
+      ansible.windows.win_regedit:
+        path: HKLM:\SOFTWARE\Policies\Microsoft\Windows\PowerShell\ModuleLogging
+        name: EnableModuleLogging
+        data: "{{ 1 if powershell_logging.module_logging else 0 }}"
+        type: dword
+      when: deployment_mode == 'protected'
+
+    - name: Enable PowerShell Script Block Logging
+      ansible.windows.win_regedit:
+        path: HKLM:\SOFTWARE\Policies\Microsoft\Windows\PowerShell\ScriptBlockLogging
+        name: EnableScriptBlockLogging
+        data: "{{ 1 if powershell_logging.script_block_logging else 0 }}"
+        type: dword
+      when: deployment_mode == 'protected'
+
+    - name: Enable PowerShell Transcription
+      ansible.windows.win_regedit:
+        path: HKLM:\SOFTWARE\Policies\Microsoft\Windows\PowerShell\Transcription
+        name: EnableTranscripting
+        data: "{{ 1 if powershell_logging.transcription else 0 }}"
+        type: dword
+      when: deployment_mode == 'protected'
+
+    - name: Set PowerShell Transcription Output Directory
+      ansible.windows.win_regedit:
+        path: HKLM:\SOFTWARE\Policies\Microsoft\Windows\PowerShell\Transcription
+        name: OutputDirectory
+        data: "{{ powershell_logging.transcription_path }}"
+        type: string
+      when: deployment_mode == 'protected' and powershell_logging.transcription
+
+    - name: Create PowerShell Transcription Directory
+      ansible.windows.win_file:
+        path: "{{ powershell_logging.transcription_path }}"
+        state: directory
+      when: deployment_mode == 'protected' and powershell_logging.transcription
+
+    # ===========================================
+    # DISABLE VULNERABLE PROTOCOLS (Protected Mode Only)
+    # ===========================================
+
+    - name: Disable SMBv1
+      ansible.windows.win_shell: |
+        Disable-WindowsOptionalFeature -Online -FeatureName SMB1Protocol -NoRestart
+      args:
+        executable: powershell
+      when: deployment_mode == 'protected'
+      ignore_errors: yes
+
+    - name: Disable LLMNR
+      ansible.windows.win_regedit:
+        path: HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient
+        name: EnableMulticast
+        data: 0
+        type: dword
+      when: deployment_mode == 'protected'
+
+    - name: Enable LLMNR (vulnerable mode)
+      ansible.windows.win_regedit:
+        path: HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient
+        name: EnableMulticast
+        data: 1
+        type: dword
+      when: deployment_mode == 'vulnerable'
+
+    - name: Disable NetBIOS over TCP/IP
+      ansible.windows.win_shell: |
+        $adapters = Get-WmiObject Win32_NetworkAdapterConfiguration | Where-Object {$_.IPEnabled -eq $true}
+        foreach ($adapter in $adapters) {
+            $adapter.SetTcpipNetbios(2)
+        }
+      args:
+        executable: powershell
+      when: deployment_mode == 'protected'
+
+    - name: Disable WPAD
+      ansible.windows.win_regedit:
+        path: "HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Internet Settings\\Wpad"
+        name: WpadOverride
+        data: 1
+        type: dword
+      when: deployment_mode == 'protected'
+
+    # ===========================================
+    # DISABLE UNNECESSARY SERVICES (Protected Mode)
+    # ===========================================
+
+    - name: Disable unnecessary services
+      ansible.windows.win_service:
+        name: "{{ item }}"
+        state: stopped
+        start_mode: disabled
+      loop: "{{ services_to_disable }}"
+      when: deployment_mode == 'protected'
+      ignore_errors: yes
+
+    # ===========================================
+    # CREDENTIAL PROTECTION
+    # ===========================================
+
+    - name: Enable Credential Guard (if supported)
+      ansible.windows.win_regedit:
+        path: HKLM:\SYSTEM\CurrentControlSet\Control\LSA
+        name: LsaCfgFlags
+        data: 1
+        type: dword
+      when: deployment_mode == 'protected'
+      ignore_errors: yes
+
+    - name: Disable WDigest (prevent plaintext password storage)
+      ansible.windows.win_regedit:
+        path: HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\WDigest
+        name: UseLogonCredential
+        data: 0
+        type: dword
+      when: deployment_mode == 'protected'
+
+    - name: Enable WDigest (vulnerable mode - allows plaintext creds)
+      ansible.windows.win_regedit:
+        path: HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\WDigest
+        name: UseLogonCredential
+        data: 1
+        type: dword
+      when: deployment_mode == 'vulnerable'
+
+    # ===========================================
+    # WINDOWS DEFENDER CONFIGURATION
+    # ===========================================
+
+    - name: Configure Windows Defender (Protected Mode)
+      ansible.windows.win_shell: |
+        Set-MpPreference -DisableRealtimeMonitoring $false
+        Set-MpPreference -DisableScriptScanning $false
+        Set-MpPreference -DisableArchiveScanning $false
+        Set-MpPreference -DisableBehaviorMonitoring $false
+      args:
+        executable: powershell
+      when: deployment_mode == 'protected'
+      ignore_errors: yes
+
+    - name: Disable Windows Defender (Vulnerable Mode - for demo purposes)
+      ansible.windows.win_shell: |
+        Set-MpPreference -DisableRealtimeMonitoring $true
+      args:
+        executable: powershell
+      when: deployment_mode == 'vulnerable'
+      ignore_errors: yes
+
+    # ===========================================
+    # REPORTING (FIXED)
+    # ===========================================
+
+    - name: Generate hardening report
+      ansible.windows.win_shell: |
+        $report = @{
+          Hostname = $env:COMPUTERNAME
+          Mode = "{{ deployment_mode }}"
+          Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+          PasswordPolicy = @{
+            MinLength = (net accounts | Select-String "Minimum password length").ToString().Split(":")[1].Trim()
+            MaxPasswordAge = (net accounts | Select-String "Maximum password age").ToString().Split(":")[1].Trim()
+            LockoutThreshold = (net accounts | Select-String "Lockout threshold").ToString().Split(":")[1].Trim()
+          }
+          Services = @(Get-Service | Where-Object {$_.Name -in @('RemoteRegistry','Browser','SSDPSRV','upnphost')} | Select-Object Name, Status)
+        }
+        $report | ConvertTo-Json -Depth 3 | Out-File "C:\hardening_report_{{ deployment_mode }}.json"
+        Write-Output "Report generated successfully"
+      args:
+        executable: powershell
+      register: report_result
+
+    - name: Display summary
+      ansible.builtin.debug:
+        msg:
+          - "Hardening completed in {{ deployment_mode }} mode"
+          - "Password min length: {{ password_policy[deployment_mode].min_password_length }}"
+          - "Password max age: {{ password_policy[deployment_mode].max_password_age }}"
+          - "Lockout threshold: {{ password_policy[deployment_mode].lockout_threshold }}"
+          - "Report saved to C:\\hardening_report_{{ deployment_mode }}.json"

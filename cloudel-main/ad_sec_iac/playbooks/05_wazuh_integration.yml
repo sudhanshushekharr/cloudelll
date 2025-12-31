@@ -1,0 +1,167 @@
+---
+- name: Configure Wazuh Integration and Active Response
+  hosts: localhost
+  gather_facts: no
+  become: yes
+  become_method: sudo
+  
+  vars:
+    enable_active_response: "{{ 'yes' if deployment_mode == 'protected' else 'no' }}"
+    wazuh_path: "/var/ossec"
+    ansible_become_pass: "{{ lookup('env', 'ANSIBLE_BECOME_PASS') | default(omit) }}"
+
+  tasks:
+    - name: Display Wazuh configuration mode
+      ansible.builtin.debug:
+        msg: 
+          - "Configuring Wazuh for {{ deployment_mode }} mode"
+          - "Active Response: {{ enable_active_response }}"
+
+    - name: Install jq for JSON parsing
+      ansible.builtin.package:
+        name: jq
+        state: present
+      ignore_errors: yes
+
+    - name: Copy custom detection rules to Wazuh
+      ansible.builtin.copy:
+        src: ../files/wazuh_rules/local_rules.xml
+        dest: "{{ wazuh_path }}/etc/rules/local_rules.xml"
+        owner: root
+        group: wazuh
+        mode: '0640'
+      notify: restart wazuh-manager
+
+    - name: Copy active response script
+      ansible.builtin.copy:
+        src: ../files/scripts/remediate-threat.sh
+        dest: "{{ wazuh_path }}/active-response/bin/remediate-threat.sh"
+        owner: root
+        group: wazuh
+        mode: '0750'
+
+    - name: Backup ossec.conf
+      ansible.builtin.copy:
+        src: "{{ wazuh_path }}/etc/ossec.conf"
+        dest: "{{ wazuh_path }}/etc/ossec.conf.backup.{{ ansible_date_time.epoch }}"
+        remote_src: yes
+
+    # CRITICAL FIX: Use a SINGLE blockinfile task with proper marker
+    - name: Configure remediate-threat command definition
+      ansible.builtin.blockinfile:
+        path: "{{ wazuh_path }}/etc/ossec.conf"
+        marker: "<!-- {mark} ANSIBLE MANAGED BLOCK - Command -->"
+        insertafter: "^\\s*<command>$"
+        block: |
+          <command>
+            <name>remediate-threat</name>
+            <executable>remediate-threat.sh</executable>
+            <timeout_allowed>no</timeout_allowed>
+          </command>
+
+    # CRITICAL FIX: Insert ALL active responses in ONE block, INSIDE last ossec_config
+    - name: Configure all Active Responses
+      ansible.builtin.blockinfile:
+        path: "{{ wazuh_path }}/etc/ossec.conf"
+        marker: "  <!-- {mark} ANSIBLE MANAGED BLOCK - Active Responses -->"
+        insertbefore: "^</ossec_config>$"
+        block: |2
+            <!-- Mimikatz Detection -->
+            <active-response>
+              <disabled>{{ enable_active_response == 'no' }}</disabled>
+              <command>remediate-threat</command>
+              <location>local</location>
+              <rules_id>100010,100011</rules_id>
+              <timeout>no</timeout>
+            </active-response>
+
+            <!-- LSASS Access -->
+            <active-response>
+              <disabled>{{ enable_active_response == 'no' }}</disabled>
+              <command>remediate-threat</command>
+              <location>local</location>
+              <rules_id>100020</rules_id>
+              <timeout>no</timeout>
+            </active-response>
+
+            <!-- Kerberoasting -->
+            <active-response>
+              <disabled>{{ enable_active_response == 'no' }}</disabled>
+              <command>remediate-threat</command>
+              <location>local</location>
+              <rules_id>100040,100041</rules_id>
+              <timeout>no</timeout>
+            </active-response>
+
+            <!-- BloodHound -->
+            <active-response>
+              <disabled>{{ enable_active_response == 'no' }}</disabled>
+              <command>remediate-threat</command>
+              <location>local</location>
+              <rules_id>100050,100051</rules_id>
+              <timeout>no</timeout>
+            </active-response>
+
+            <!-- Honeypot (CRITICAL) -->
+            <active-response>
+              <disabled>{{ enable_active_response == 'no' }}</disabled>
+              <command>remediate-threat</command>
+              <location>local</location>
+              <rules_id>100080,100081</rules_id>
+              <timeout>no</timeout>
+            </active-response>
+
+            <!-- Pass-the-Hash -->
+            <active-response>
+              <disabled>{{ enable_active_response == 'no' }}</disabled>
+              <command>remediate-threat</command>
+              <location>local</location>
+              <rules_id>100110</rules_id>
+              <timeout>no</timeout>
+            </active-response>
+
+    # Add XML validation task
+    - name: Validate ossec.conf XML structure
+      ansible.builtin.command:
+        cmd: xmllint --noout {{ wazuh_path }}/etc/ossec.conf
+      register: xml_validation
+      failed_when: xml_validation.rc != 0
+      changed_when: false
+
+    - name: Restart Wazuh Manager
+      ansible.builtin.systemd:
+        name: wazuh-manager
+        state: restarted
+        enabled: yes
+
+    - name: Wait for Wazuh to be ready
+      ansible.builtin.wait_for:
+        port: 1514
+        delay: 5
+        timeout: 30
+
+    - name: Verify Wazuh Manager is running
+      ansible.builtin.systemd:
+        name: wazuh-manager
+        state: started
+      register: wazuh_status
+
+    - name: Count custom rules loaded
+      ansible.builtin.shell: |
+        grep -c "rule id=" {{ wazuh_path }}/etc/rules/local_rules.xml || echo "0"
+      register: rules_count
+      changed_when: false
+
+    - name: Display configuration summary
+      ansible.builtin.debug:
+        msg:
+          - "Wazuh configuration completed for {{ deployment_mode }} mode"
+          - "Active Response Status: {{ 'ENABLED' if enable_active_response == 'yes' else 'DISABLED' }}"
+          - "Custom Rules Loaded: {{ rules_count.stdout }}"
+          - "Wazuh Manager Status: {{ wazuh_status.status.ActiveState }}"
+
+  handlers:
+    - name: restart wazuh-manager
+      ansible.builtin.systemd:
+        name: wazuh-manager
+        state: restarted

@@ -1,0 +1,78 @@
+---
+- name: Deploy and Configure Sysmon
+  hosts: windows
+  gather_facts: yes
+
+  tasks:
+    - name: Create Sysmon installation directory
+      ansible.windows.win_file:
+        path: "{{ sysmon.install_path }}"
+        state: directory
+
+    - name: Check if Sysmon is already installed
+      ansible.windows.win_service:
+        name: "{{ sysmon.service_name }}"
+      register: sysmon_service
+      ignore_errors: yes
+
+    - name: Download Sysmon
+      ansible.windows.win_get_url:
+        url: "{{ sysmon.download_url }}"
+        dest: "{{ sysmon.install_path }}\\Sysmon.zip"
+      when: sysmon_service is failed
+
+    - name: Extract Sysmon
+      community.windows.win_unzip:
+        src: "{{ sysmon.install_path }}\\Sysmon.zip"
+        dest: "{{ sysmon.install_path }}"
+      when: sysmon_service is failed
+
+    - name: Copy Sysmon configuration file
+      ansible.windows.win_copy:
+        src: ../files/sysmonconfig.xml
+        dest: "{{ sysmon.install_path }}\\sysmonconfig.xml"
+
+    - name: Install Sysmon with configuration
+      ansible.windows.win_shell: |
+        cd "{{ sysmon.install_path }}"
+        .\Sysmon64.exe -accepteula -i sysmonconfig.xml
+      args:
+        executable: cmd
+      when: sysmon_service is failed
+      register: sysmon_install
+
+    - name: Update Sysmon configuration (if already installed)
+      ansible.windows.win_shell: |
+        cd "{{ sysmon.install_path }}"
+        .\Sysmon64.exe -c sysmonconfig.xml
+      args:
+        executable: cmd
+      when: sysmon_service is not failed
+
+    - name: Verify Sysmon service is running
+      ansible.windows.win_service:
+        name: "{{ sysmon.service_name }}"
+        state: started
+        start_mode: auto
+
+    - name: Configure Sysmon event log size (increase to 1GB)
+      ansible.windows.win_shell: |
+        wevtutil sl Microsoft-Windows-Sysmon/Operational /ms:1073741824
+      args:
+        executable: cmd
+
+    - name: Check Sysmon event log
+      ansible.windows.win_shell: |
+        Get-WinEvent -LogName "Microsoft-Windows-Sysmon/Operational" -MaxEvents 5 | Select-Object TimeCreated, Id, Message | ConvertTo-Json
+      args:
+        executable: powershell
+      register: sysmon_events
+      ignore_errors: yes
+
+    - name: Display Sysmon status
+      ansible.builtin.debug:
+        msg:
+          - "Sysmon deployed successfully"
+          - "Service: {{ sysmon.service_name }}"
+          - "Config: {{ sysmon.install_path }}\\sysmonconfig.xml"
+          - "Recent events captured: {{ (sysmon_events.stdout | from_json | length) if sysmon_events.stdout else 0 }}"

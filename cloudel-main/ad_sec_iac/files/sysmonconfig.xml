@@ -1,0 +1,106 @@
+<Sysmon schemaversion="4.90">
+  <HashAlgorithms>md5,sha256,IMPHASH</HashAlgorithms>
+  <EventFiltering>
+    
+    <!-- Process Creation - Event ID 1 -->
+    <ProcessCreate onmatch="include">
+      <!-- Mimikatz detection -->
+      <Image condition="contains">mimikatz</Image>
+      <CommandLine condition="contains">sekurlsa</CommandLine>
+      <CommandLine condition="contains">lsadump</CommandLine>
+      
+      <!-- PowerShell suspicious activity -->
+      <CommandLine condition="contains">-enc</CommandLine>
+      <CommandLine condition="contains">-encodedcommand</CommandLine>
+      <CommandLine condition="contains">invoke-mimikatz</CommandLine>
+      <CommandLine condition="contains">invoke-expression</CommandLine>
+      <CommandLine condition="contains">downloadstring</CommandLine>
+      
+      <!-- Responder and credential theft -->
+      <Image condition="contains">responder</Image>
+      <CommandLine condition="contains">Responder.py</CommandLine>
+      
+      <!-- BloodHound detection -->
+      <Image condition="contains">sharphound</Image>
+      <CommandLine condition="contains">bloodhound</CommandLine>
+      <CommandLine condition="contains">invoke-bloodhound</CommandLine>
+      
+      <!-- Kerberoasting -->
+      <CommandLine condition="contains">invoke-kerberoast</CommandLine>
+      <CommandLine condition="contains">rubeus</CommandLine>
+      
+      <!-- Process injection tools -->
+      <Image condition="contains">psexec</Image>
+      <Image condition="contains">procdump</Image>
+      
+      <!-- System reconnaissance -->
+      <CommandLine condition="contains">net user</CommandLine>
+      <CommandLine condition="contains">net group</CommandLine>
+      <CommandLine condition="contains">whoami</CommandLine>
+      <CommandLine condition="contains">nltest</CommandLine>
+    </ProcessCreate>
+
+    <!-- Network Connection - Event ID 3 -->
+    <NetworkConnect onmatch="include">
+      <!-- Suspicious outbound connections -->
+      <DestinationPort condition="is">4444</DestinationPort>
+      <DestinationPort condition="is">5555</DestinationPort>
+      <Image condition="contains">powershell</Image>
+      <Image condition="contains">cmd.exe</Image>
+    </NetworkConnect>
+
+    <!-- Process Access - Event ID 10 -->
+    <ProcessAccess onmatch="include">
+      <!-- LSASS memory access (credential dumping) -->
+      <TargetImage condition="contains">lsass.exe</TargetImage>
+      <GrantedAccess condition="is">0x1010</GrantedAccess>
+      <GrantedAccess condition="is">0x1410</GrantedAccess>
+      <GrantedAccess condition="is">0x147a</GrantedAccess>
+    </ProcessAccess>
+
+    <!-- File Creation - Event ID 11 -->
+    <FileCreate onmatch="include">
+      <!-- Credential dumping outputs -->
+      <TargetFilename condition="contains">.kirbi</TargetFilename>
+      <TargetFilename condition="contains">.dmp</TargetFilename>
+      <TargetFilename condition="contains">lsass</TargetFilename>
+      
+      <!-- Suspicious extensions -->
+      <TargetFilename condition="end with">.hta</TargetFilename>
+      <TargetFilename condition="end with">.vbs</TargetFilename>
+      
+      <!-- Web shell indicators -->
+      <TargetFilename condition="contains">wwwroot</TargetFilename>
+      <TargetFilename condition="end with">.asp</TargetFilename>
+      <TargetFilename condition="end with">.aspx</TargetFilename>
+    </FileCreate>
+
+    <!-- Registry Events - Event ID 13 -->
+    <RegistryEvent onmatch="include">
+      <!-- Persistence mechanisms -->
+      <TargetObject condition="contains">CurrentVersion\Run</TargetObject>
+      <TargetObject condition="contains">CurrentVersion\RunOnce</TargetObject>
+      <TargetObject condition="contains">Windows\CurrentVersion\Policies\Explorer\Run</TargetObject>
+      
+      <!-- Authentication modifications -->
+      <TargetObject condition="contains">Lsa\</TargetObject>
+      <TargetObject condition="contains">System\CurrentControlSet\Control\SecurityProviders</TargetObject>
+    </RegistryEvent>
+
+    <!-- Named Pipes - Event ID 17/18 -->
+    <PipeEvent onmatch="include">
+      <!-- Common attack tool pipes -->
+      <PipeName condition="contains">psexec</PipeName>
+      <PipeName condition="contains">paexec</PipeName>
+      <PipeName condition="contains">remcom</PipeName>
+      <PipeName condition="contains">msagent</PipeName>
+    </PipeEvent>
+
+    <!-- WMI Events - Event ID 19/20/21 -->
+    <WmiEvent onmatch="include">
+      <!-- WMI persistence -->
+      <Operation condition="is">Created</Operation>
+    </WmiEvent>
+
+  </EventFiltering>
+</Sysmon>

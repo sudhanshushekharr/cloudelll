@@ -1,0 +1,144 @@
+---
+# Master Playbook - Deploy Complete AD Security Infrastructure
+# Usage:
+#   Vulnerable Mode: ansible-playbook deploy_all.yml -e "deployment_mode=vulnerable"
+#   Protected Mode:  ansible-playbook deploy_all.yml -e "deployment_mode=protected"
+
+- name: Deploy Complete AD Security Lab Infrastructure
+  hosts: localhost
+  gather_facts: yes
+
+  vars:
+    deployment_mode: "{{ deployment_mode | default('vulnerable') }}"
+
+  tasks:
+    - name: Validate deployment mode
+      ansible.builtin.assert:
+        that:
+          - deployment_mode in ['vulnerable', 'protected']
+        fail_msg: "deployment_mode must be either 'vulnerable' or 'protected'"
+        success_msg: "Deploying in {{ deployment_mode }} mode"
+
+    - name: Display deployment banner
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "  AD Security Lab Deployment"
+          - "  Mode: {{ deployment_mode | upper }}"
+          - "  Timestamp: {{ ansible_date_time.iso8601 }}"
+          - "=========================================="
+
+    - name: Update group_vars with deployment mode
+      ansible.builtin.lineinfile:
+        path: group_vars/all.yml
+        regexp: "^deployment_mode:"
+        line: 'deployment_mode: "{{ deployment_mode }}"'
+
+# ===========================================
+# PHASE 1: WINDOWS BASELINE HARDENING
+# ===========================================
+
+- name: "Phase 1: Windows Baseline Hardening"
+  import_playbook: playbooks/01_baseline_hardening.yml
+
+# ===========================================
+# PHASE 2: DEPLOY SYSMON
+# ===========================================
+
+- name: "Phase 2: Deploy Sysmon"
+  import_playbook: playbooks/02_deploy_sysmon.yml
+
+# ===========================================
+# PHASE 3: CONFIGURE AUDITING
+# ===========================================
+
+- name: "Phase 3: Configure Advanced Auditing"
+  import_playbook: playbooks/03_configure_auditing.yml
+
+# ===========================================
+# PHASE 4: AD SECURITY CONFIGURATION
+# ===========================================
+
+- name: "Phase 4: AD Security Configuration"
+  import_playbook: playbooks/04_ad_security.yml
+
+# ===========================================
+# PHASE 5: WAZUH INTEGRATION
+# ===========================================
+
+- name: "Phase 5: Wazuh Integration and Active Response"
+  import_playbook: playbooks/05_wazuh_integration.yml
+
+# ===========================================
+# FINAL REPORTING
+# ===========================================
+
+- name: Final Deployment Summary
+  hosts: localhost
+  gather_facts: yes
+
+  tasks:
+    - name: Generate deployment summary
+      ansible.builtin.copy:
+        content: |
+          AD Security Lab Deployment Summary
+          ===================================
+
+          Deployment Mode: {{ deployment_mode }}
+          Timestamp: {{ ansible_date_time.iso8601 }}
+
+          Components Deployed:
+          -------------------
+          ✓ Windows Baseline Hardening
+          ✓ Sysmon Event Collection
+          ✓ Advanced Audit Policies
+          ✓ AD Security Controls
+          ✓ Wazuh Custom Rules
+          ✓ Active Response ({{ 'ENABLED' if deployment_mode == 'protected' else 'DISABLED' }})
+
+          Windows Hosts:
+          -------------
+          {% for host in groups['windows'] %}
+          - {{ host }}: {{ hostvars[host]['ansible_host'] }}
+          {% endfor %}
+
+          Next Steps:
+          -----------
+          {% if deployment_mode == 'vulnerable' %}
+          1. Run attack simulations (Mimikatz, BloodHound, etc.)
+          2. Verify Wazuh detections in dashboard
+          3. Switch to protected mode: ansible-playbook deploy_all.yml -e "deployment_mode=protected"
+          4. Re-run attacks to see active response in action
+          {% else %}
+          1. Verify active responses are enabled in Wazuh
+          2. Run attack simulations to test automated response
+          3. Review logs: /var/ossec/logs/active-responses.log
+          4. Check blocked/remediated threats in Wazuh dashboard
+          {% endif %}
+
+          Important Files:
+          ---------------
+          Windows Machines:
+          - C:\hardening_report_{{ deployment_mode }}.json
+          - C:\audit_policy_{{ deployment_mode }}.txt
+          - C:\ad_security_report.json
+          - C:\Program Files\Sysmon\sysmonconfig.xml
+
+          Wazuh Manager:
+          - /var/ossec/etc/rules/local_rules.xml
+          - /var/ossec/active-response/bin/remediate-threat.sh
+          - /var/ossec/logs/active-responses.log
+
+        dest: "./deployment_summary_{{ deployment_mode }}_{{ ansible_date_time.epoch }}.txt"
+
+    - name: Display final summary
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "  DEPLOYMENT COMPLETE!"
+          - "  Mode: {{ deployment_mode | upper }}"
+          - "=========================================="
+          - ""
+          - "Summary file created: deployment_summary_{{ deployment_mode }}_{{ ansible_date_time.epoch }}.txt"
+          - ""
+          - "{% if deployment_mode == 'vulnerable' %}VULNERABLE MODE: Attacks will succeed, but detections will fire{% else %}PROTECTED MODE: Active responses will block and remediate threats{% endif %}"

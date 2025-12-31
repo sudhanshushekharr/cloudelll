@@ -1,0 +1,13 @@
+wazuh_manager_ip: "127.0.0.1"
+
+project_name: "ad_security_lab"
+
+
+deployment_mode: "protected"
+
+log_retention_days: 90
+
+timezone: "UTC"
+
+ansible_winrm_operation_timeout_sec: 60
+ansible_winrm_read_timeout_sec: 70
